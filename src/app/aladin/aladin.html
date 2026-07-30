@@ -1,0 +1,213 @@
+<div class="aladin-page">
+  <div class="aladin-toolbar-row">
+    <button
+      #panelToggleBtn
+      type="button"
+      class="aladin-style-btn tooltip-align-left"
+      (click)="togglePanel()"
+      data-tooltip="Open the field of view calculator"
+    >Field of View Calculator</button>
+
+    <button
+      type="button"
+      class="aladin-style-btn icon-btn"
+      [disabled]="!fovResult()"
+      (click)="toggleReticleVisibility()"
+      [attr.aria-label]="reticleVisible() ? 'Hide field of view rectangle' : 'Show field of view rectangle'"
+      [attr.data-tooltip]="!fovResult() ? 'Calculate a field of view first' : (reticleVisible() ? 'Hide field of view rectangle' : 'Show field of view rectangle')"
+    >
+      @if (reticleVisible()) {
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.5 18.5 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+          <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>
+      } @else {
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      }
+    </button>
+
+    <div class="rotation-control">
+      <button type="button" class="aladin-style-btn" (click)="rotateBy(-5)" data-tooltip="Decrease rotation by 5°">&laquo;</button>
+      <button type="button" class="aladin-style-btn" (click)="rotateBy(-1)" data-tooltip="Decrease rotation by 1°">&lt;</button>
+      <input
+        type="text"
+        inputmode="numeric"
+        class="aladin-style-input"
+        [ngModel]="rotationAngleDeg() + '°'"
+        (ngModelChange)="onRotationTextInput($event)"
+        data-tooltip="Field of view rotation angle, 0-360°"
+      />
+      <button type="button" class="aladin-style-btn" (click)="rotateBy(1)" data-tooltip="Increase rotation by 1°">&gt;</button>
+      <button type="button" class="aladin-style-btn" (click)="rotateBy(5)" data-tooltip="Increase rotation by 5°">&raquo;</button>
+    </div>
+
+    <button
+      #mosaicPanelToggleBtn
+      type="button"
+      class="aladin-style-btn"
+      (click)="toggleMosaicPanel()"
+      data-tooltip="Open mosaic settings"
+    >Mosaic</button>
+
+    <div class="search-control">
+      <input
+        type="text"
+        class="aladin-style-input search-input"
+        placeholder="Search object (e.g. M31)"
+        [ngModel]="searchQuery()"
+        (ngModelChange)="onSearchInput($event)"
+        (keydown.enter)="search()"
+        data-tooltip="Search catalogs (SIMBAD/NED/VizieR) by object name and center the map on it"
+      />
+      <button type="button" class="aladin-style-btn icon-btn" (click)="search()" data-tooltip="Search and center on object">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      </button>
+      @if (searchError(); as error) {
+        <span class="search-error">{{ error }}</span>
+      }
+    </div>
+  </div>
+
+  <div class="aladin-wrapper">
+    <div #aladinContainer class="aladin-container"></div>
+
+    @if (reticleVisible() && reticleSize(); as reticle) {
+      <div class="fov-rotator" [style.transform]="'translate(-50%, -50%) rotate(' + rotationAngleDeg() + 'deg)'">
+        @for (tile of mosaicTiles(); track $index) {
+          <div
+            class="fov-reticle"
+            [style.left.px]="tile.leftPx"
+            [style.top.px]="tile.topPx"
+            [style.width.px]="reticle.widthPx"
+            [style.height.px]="reticle.heightPx"
+          ></div>
+        }
+
+        @if (fovResult(); as result) {
+          <div class="fov-label" [style.bottom.px]="(mosaicBounds()?.heightPx ?? reticle.heightPx) / 2 + 8">
+            FOV: {{ formatAngle(result.widthDeg) }} &times; {{ formatAngle(result.heightDeg) }} &middot; Pixel scale:
+            {{ result.pixelScaleArcsecPerPixel.toFixed(2) }}"/px
+          </div>
+        }
+      </div>
+    }
+
+    <aside #fovPanel class="fov-panel" [class.fov-panel--open]="panelOpen()">
+      <div class="fov-panel-header">
+        <h2>Field of View Calculator</h2>
+        <button type="button" class="fov-panel-close" (click)="closePanel()" aria-label="Close" data-tooltip="Close">&times;</button>
+      </div>
+
+      <label for="telescope-select">Telescope</label>
+      <select id="telescope-select" [ngModel]="telescopeId()" (ngModelChange)="onTelescopeChange($event)">
+        @for (telescope of telescopes; track telescope.id) {
+          <option [value]="telescope.id">{{ telescope.name }}</option>
+        }
+        <option value="custom">Custom</option>
+      </select>
+
+      <label for="focal-length-input">Focal length (mm)</label>
+      <input
+        id="focal-length-input"
+        type="number"
+        step="1"
+        min="1"
+        [ngModel]="focalLengthMm()"
+        (ngModelChange)="onFocalLengthInput($event)"
+      />
+
+      <label for="reducer-input">Focal reducer / barlow factor</label>
+      <input
+        id="reducer-input"
+        type="number"
+        step="0.01"
+        min="0.01"
+        [ngModel]="reducerFactor()"
+        (ngModelChange)="onReducerChange($event)"
+      />
+
+      <label for="camera-select">Camera</label>
+      <select id="camera-select" [ngModel]="cameraId()" (ngModelChange)="onCameraChange($event)">
+        @for (camera of cameras; track camera.id) {
+          <option [value]="camera.id">{{ camera.name }}</option>
+        }
+        <option value="custom">Custom</option>
+      </select>
+
+      <label for="sensor-width-input">Sensor width (mm)</label>
+      <input
+        id="sensor-width-input"
+        type="number"
+        step="0.1"
+        min="0.1"
+        [ngModel]="sensorWidthMm()"
+        (ngModelChange)="onSensorWidthInput($event)"
+      />
+
+      <label for="sensor-height-input">Sensor height (mm)</label>
+      <input
+        id="sensor-height-input"
+        type="number"
+        step="0.1"
+        min="0.1"
+        [ngModel]="sensorHeightMm()"
+        (ngModelChange)="onSensorHeightInput($event)"
+      />
+
+      <label for="pixel-size-input">Pixel size (&micro;m)</label>
+      <input
+        id="pixel-size-input"
+        type="number"
+        step="0.01"
+        min="0.1"
+        [ngModel]="pixelSizeMicrons()"
+        (ngModelChange)="onPixelSizeInput($event)"
+      />
+
+      <button type="button" class="calculate-btn" (click)="calculateFov()" data-tooltip="Calculate field of view">Calculate</button>
+    </aside>
+
+    <aside #mosaicPanel class="fov-panel mosaic-panel" [class.mosaic-panel--open]="mosaicPanelOpen()">
+      <div class="fov-panel-header">
+        <h2>Mosaic</h2>
+        <button type="button" class="fov-panel-close" (click)="closeMosaicPanel()" aria-label="Close" data-tooltip="Close">&times;</button>
+      </div>
+
+      <label for="mosaic-rows-input">Rows</label>
+      <input
+        id="mosaic-rows-input"
+        type="number"
+        step="1"
+        min="1"
+        [ngModel]="rows()"
+        (ngModelChange)="onRowsInput($event)"
+      />
+
+      <label for="mosaic-columns-input">Columns</label>
+      <input
+        id="mosaic-columns-input"
+        type="number"
+        step="1"
+        min="1"
+        [ngModel]="columns()"
+        (ngModelChange)="onColumnsInput($event)"
+      />
+
+      <label for="mosaic-overlap-input">Overlap (px)</label>
+      <input
+        id="mosaic-overlap-input"
+        type="number"
+        step="1"
+        min="0"
+        [ngModel]="overlapPx()"
+        (ngModelChange)="onOverlapInput($event)"
+      />
+    </aside>
+  </div>
+</div>
