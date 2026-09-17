@@ -53,6 +53,13 @@ export class Aladin implements AfterViewInit {
   protected readonly fovResult = signal<FovResult | null>(null);
   protected readonly reticleSize = signal<ReticleSize | null>(null);
   protected readonly rotationAngleDeg = signal(0);
+  // Aladin's own view can drift in field rotation while panning (it pans by
+  // rotating on the celestial sphere, not a flat translate). Rather than
+  // fighting that by writing back into Aladin (setRotation() is an expensive
+  // WASM-side recompute), we just read the drift and counter-rotate our own
+  // overlay so it keeps representing the same true sky position angle.
+  protected readonly viewRollDeg = signal(0);
+  protected readonly effectiveRotationDeg = computed(() => this.rotationAngleDeg() - this.viewRollDeg());
   protected readonly reticleVisible = signal(true);
   protected readonly searchQuery = signal('');
   protected readonly searchError = signal<string | null>(null);
@@ -120,6 +127,9 @@ export class Aladin implements AfterViewInit {
     });
 
     this.aladinInstance.on('zoomChanged', () => this.updateReticleSize());
+    this.aladinInstance.on('positionChanged', () => {
+      this.viewRollDeg.set(this.aladinInstance.getRotation());
+    });
   }
 
   protected togglePanel(): void {

@@ -78,7 +78,7 @@
     <div #aladinContainer class="aladin-container"></div>
 
     @if (reticleVisible() && reticleSize(); as reticle) {
-      <div class="fov-rotator" [style.transform]="'translate(-50%, -50%) rotate(' + rotationAngleDeg() + 'deg)'">
+      <div class="fov-rotator" [style.transform]="'translate(-50%, -50%) rotate(' + effectiveRotationDeg() + 'deg)'">
         @for (tile of mosaicTiles(); track $index) {
           <div
             class="fov-reticle"
