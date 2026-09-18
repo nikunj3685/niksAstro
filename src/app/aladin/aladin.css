@@ -24,26 +24,10 @@
   height: 100%;
 }
 
-.fov-rotator {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  z-index: 500;
-}
-
-.fov-reticle {
-  position: absolute;
-  top: 0;
-  left: 0;
-  transform: translate(-50%, -50%);
-  border: 2px solid #00e5a0;
-  box-sizing: border-box;
-  pointer-events: none;
-}
-
 .fov-label {
   position: absolute;
-  left: 0;
+  top: 0.5rem;
+  left: 50%;
   transform: translateX(-50%);
   color: #00e5a0;
   background: rgba(0, 0, 0, 0.6);
@@ -53,6 +37,7 @@
   font-family: monospace;
   white-space: nowrap;
   pointer-events: none;
+  z-index: 500;
 }
 
 .aladin-toolbar-row {

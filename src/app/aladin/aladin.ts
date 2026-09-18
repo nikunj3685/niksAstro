@@ -1,4 +1,4 @@
-import { AfterViewInit, Component, computed, ElementRef, HostListener, signal, viewChild } from '@angular/core';
+import { AfterViewInit, Component, ElementRef, HostListener, signal, viewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { CAMERAS, TELESCOPES } from './fov-data';
 
@@ -8,19 +8,9 @@ interface FovResult {
   pixelScaleArcsecPerPixel: number;
 }
 
-interface ReticleSize {
-  widthPx: number;
-  heightPx: number;
-}
-
-interface MosaicTile {
-  leftPx: number;
-  topPx: number;
-}
-
-interface MosaicBounds {
-  widthPx: number;
-  heightPx: number;
+interface OverlapDeg {
+  widthDeg: number;
+  heightDeg: number;
 }
 
 @Component({
@@ -36,7 +26,10 @@ export class Aladin implements AfterViewInit {
   private readonly mosaicPanel = viewChild<ElementRef<HTMLElement>>('mosaicPanel');
   private readonly mosaicPanelToggleBtn = viewChild<ElementRef<HTMLElement>>('mosaicPanelToggleBtn');
 
+  private A: any;
   private aladinInstance: any;
+  private fovOverlay: any;
+  private mosaicOverlapDeg: OverlapDeg = { widthDeg: 0, heightDeg: 0 };
 
   protected readonly telescopes = TELESCOPES;
   protected readonly cameras = CAMERAS;
@@ -51,15 +44,7 @@ export class Aladin implements AfterViewInit {
   protected readonly sensorHeightMm = signal(0);
   protected readonly pixelSizeMicrons = signal(0);
   protected readonly fovResult = signal<FovResult | null>(null);
-  protected readonly reticleSize = signal<ReticleSize | null>(null);
   protected readonly rotationAngleDeg = signal(0);
-  // Aladin's own view can drift in field rotation while panning (it pans by
-  // rotating on the celestial sphere, not a flat translate). Rather than
-  // fighting that by writing back into Aladin (setRotation() is an expensive
-  // WASM-side recompute), we just read the drift and counter-rotate our own
-  // overlay so it keeps representing the same true sky position angle.
-  protected readonly viewRollDeg = signal(0);
-  protected readonly effectiveRotationDeg = computed(() => this.rotationAngleDeg() - this.viewRollDeg());
   protected readonly reticleVisible = signal(true);
   protected readonly searchQuery = signal('');
   protected readonly searchError = signal<string | null>(null);
@@ -67,57 +52,28 @@ export class Aladin implements AfterViewInit {
   protected readonly columns = signal(1);
   protected readonly overlapPx = signal(20);
 
-  protected readonly mosaicTiles = computed<MosaicTile[]>(() => {
-    const reticle = this.reticleSize();
-    if (!reticle) {
-      return [];
-    }
-
-    const rows = Math.max(1, Math.round(this.rows()));
-    const columns = Math.max(1, Math.round(this.columns()));
-    const overlap = Math.max(0, this.overlapPx());
-
-    const stepX = reticle.widthPx - overlap;
-    const stepY = reticle.heightPx - overlap;
-
-    const tiles: MosaicTile[] = [];
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < columns; col++) {
-        tiles.push({
-          leftPx: (col - (columns - 1) / 2) * stepX,
-          topPx: (row - (rows - 1) / 2) * stepY
-        });
-      }
-    }
-    return tiles;
-  });
-
-  protected readonly mosaicBounds = computed<MosaicBounds | null>(() => {
-    const reticle = this.reticleSize();
-    if (!reticle) {
-      return null;
-    }
-
-    const rows = Math.max(1, Math.round(this.rows()));
-    const columns = Math.max(1, Math.round(this.columns()));
-    const overlap = Math.max(0, this.overlapPx());
-
-    return {
-      widthPx: columns * reticle.widthPx - (columns - 1) * overlap,
-      heightPx: rows * reticle.heightPx - (rows - 1) * overlap
-    };
-  });
-
   constructor() {
     this.syncFocalLengthFromTelescope();
     this.syncCameraFieldsFromCamera();
   }
 
   async ngAfterViewInit(): Promise<void> {
-    const A = (await import('aladin-lite')).default;
-    await A.init;
+    // Aladin Lite v2 (not v3): panning recomputes a flat gnomonic projection
+    // centered on the new RA/Dec on every drag step, so the view never rolls
+    // in the first place — unlike v3's WebGL/WASM trackball-style 3D camera,
+    // which rotates the view on the celestial sphere while panning. v2 isn't
+    // published on npm, so it's loaded as a global script from CDS's own CDN
+    // (the same one their official "vanilla" embed docs point to), with
+    // jQuery as its one hard dependency.
+    if (!(window as any).jQuery) {
+      await this.loadScript('https://code.jquery.com/jquery-3.7.1.min.js');
+    }
+    this.loadStylesheet('https://aladin.cds.unistra.fr/AladinLite/api/v2/latest/aladin.min.css');
+    await this.loadScript('https://aladin.cds.unistra.fr/AladinLite/api/v2/latest/aladin.min.js');
 
-    this.aladinInstance = A.aladin(this.container().nativeElement, {
+    this.A = (window as any).A;
+
+    this.aladinInstance = this.A.aladin(this.container().nativeElement, {
       target: 'NGC 7000',
       fov: 8,
       cooFrame: 'equatorial',
@@ -126,10 +82,35 @@ export class Aladin implements AfterViewInit {
       showCooGrid: false
     });
 
-    this.aladinInstance.on('zoomChanged', () => this.updateReticleSize());
-    this.aladinInstance.on('positionChanged', () => {
-      this.viewRollDeg.set(this.aladinInstance.getRotation());
+    // Draw the FOV rectangle(s) as real sky-coordinate polygons rather than a
+    // fixed CSS overlay. Aladin projects overlay shapes with the same WCS math
+    // it uses for the sky tiles themselves, so they're always correctly
+    // oriented to true north/east no matter how the view rotates while
+    // panning — no need to read or fight Aladin's own view rotation at all.
+    // Recentering on every positionChanged keeps it framed like a viewfinder
+    // reticle (always showing what's currently centered) rather than marking
+    // one fixed sky location.
+    this.fovOverlay = this.A.graphicOverlay({ color: '#00e5a0', lineWidth: 2 });
+    this.aladinInstance.addOverlay(this.fovOverlay);
+
+    this.aladinInstance.on('positionChanged', () => this.redrawFovOverlay());
+  }
+
+  private loadScript(src: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+      document.head.appendChild(script);
     });
+  }
+
+  private loadStylesheet(href: string): void {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    document.head.appendChild(link);
   }
 
   protected togglePanel(): void {
@@ -150,6 +131,7 @@ export class Aladin implements AfterViewInit {
 
   protected toggleReticleVisibility(): void {
     this.reticleVisible.update((visible) => !visible);
+    this.redrawFovOverlay();
   }
 
   protected onSearchInput(value: string): void {
@@ -198,6 +180,7 @@ export class Aladin implements AfterViewInit {
   protected setRotation(value: number): void {
     const clamped = Math.min(360, Math.max(0, value));
     this.rotationAngleDeg.set(clamped);
+    this.redrawFovOverlay();
   }
 
   protected onRotationTextInput(value: string): void {
@@ -250,14 +233,20 @@ export class Aladin implements AfterViewInit {
 
   protected onRowsInput(value: number): void {
     this.rows.set(Math.max(1, Math.round(value)));
+    this.refreshMosaicOverlapDeg();
+    this.redrawFovOverlay();
   }
 
   protected onColumnsInput(value: number): void {
     this.columns.set(Math.max(1, Math.round(value)));
+    this.refreshMosaicOverlapDeg();
+    this.redrawFovOverlay();
   }
 
   protected onOverlapInput(value: number): void {
     this.overlapPx.set(Math.max(0, value));
+    this.refreshMosaicOverlapDeg();
+    this.redrawFovOverlay();
   }
 
   protected calculateFov(): void {
@@ -272,9 +261,10 @@ export class Aladin implements AfterViewInit {
     this.fovResult.set({ widthDeg, heightDeg, pixelScaleArcsecPerPixel });
     this.reticleVisible.set(true);
 
-    this.aladinInstance.setFoV(8);
+    this.aladinInstance.setFov(8);
 
-    this.updateReticleSize();
+    this.refreshMosaicOverlapDeg();
+    this.redrawFovOverlay();
   }
 
   protected formatAngle(deg: number): string {
@@ -284,19 +274,95 @@ export class Aladin implements AfterViewInit {
     return `${deg.toFixed(3)}°`;
   }
 
-  private updateReticleSize(): void {
-    const result = this.fovResult();
-    if (!result || !this.aladinInstance) {
+  /** Converts the user's pixel-based overlap input into a fixed degree value,
+   *  using the view's current arcsec/pixel scale as the conversion basis. */
+  private refreshMosaicOverlapDeg(): void {
+    if (!this.aladinInstance) {
       return;
     }
 
     const [fovXdeg, fovYdeg]: [number, number] = this.aladinInstance.getFov();
     const [viewWidthPx, viewHeightPx]: [number, number] = this.aladinInstance.getSize();
+    const overlapPx = Math.max(0, this.overlapPx());
 
-    this.reticleSize.set({
-      widthPx: (result.widthDeg / fovXdeg) * viewWidthPx,
-      heightPx: (result.heightDeg / fovYdeg) * viewHeightPx
-    });
+    this.mosaicOverlapDeg = {
+      widthDeg: (overlapPx / viewWidthPx) * fovXdeg,
+      heightDeg: (overlapPx / viewHeightPx) * fovYdeg
+    };
+  }
+
+  private redrawFovOverlay(): void {
+    if (!this.aladinInstance || !this.fovOverlay || !this.A) {
+      return;
+    }
+
+    this.fovOverlay.removeAll();
+
+    const result = this.fovResult();
+    if (!result || !this.reticleVisible()) {
+      return;
+    }
+
+    const rows = Math.max(1, Math.round(this.rows()));
+    const columns = Math.max(1, Math.round(this.columns()));
+    const stepXDeg = result.widthDeg - this.mosaicOverlapDeg.widthDeg;
+    const stepYDeg = result.heightDeg - this.mosaicOverlapDeg.heightDeg;
+    const halfWidthDeg = result.widthDeg / 2;
+    const halfHeightDeg = result.heightDeg / 2;
+
+    const [centerRa, centerDec]: [number, number] = this.aladinInstance.getRaDec();
+    const centerRaRad = (centerRa * Math.PI) / 180;
+    const centerDecRad = (centerDec * Math.PI) / 180;
+    const sinDec0 = Math.sin(centerDecRad);
+    const cosDec0 = Math.cos(centerDecRad);
+    const rotationRad = (this.rotationAngleDeg() * Math.PI) / 180;
+    const cosRot = Math.cos(rotationRad);
+    const sinRot = Math.sin(rotationRad);
+
+    const footprints: any[] = [];
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const tileOffsetXDeg = (col - (columns - 1) / 2) * stepXDeg;
+        const tileOffsetYDeg = (row - (rows - 1) / 2) * stepYDeg;
+
+        const localCorners: [number, number][] = [
+          [-halfWidthDeg, -halfHeightDeg],
+          [halfWidthDeg, -halfHeightDeg],
+          [halfWidthDeg, halfHeightDeg],
+          [-halfWidthDeg, halfHeightDeg]
+        ];
+
+        // Proper gnomonic (TAN) tangent-plane projection: (rotatedX, rotatedY)
+        // are "standard coordinates" (xi, eta) around the view center, not a
+        // flat degree offset. Using a single shared cos(dec) for every corner
+        // (the old approach) doesn't correctly account for how a physically
+        // rectangular sensor's true footprint curves on the sky — this is the
+        // same inverse-TAN math real plate-solving/WCS tools use, and it's
+        // what makes the rectangle behave sensibly at high declinations.
+        const raDecCorners: [number, number][] = localCorners.map(([localX, localY]) => {
+          const x = tileOffsetXDeg + localX;
+          const y = tileOffsetYDeg + localY;
+          const rotatedX = x * cosRot - y * sinRot;
+          const rotatedY = x * sinRot + y * cosRot;
+
+          const xi = (-rotatedX * Math.PI) / 180;
+          const eta = (rotatedY * Math.PI) / 180;
+
+          const denom = cosDec0 - eta * sinDec0;
+          const deltaRaRad = Math.atan2(xi, denom);
+          const decRad = Math.atan2(sinDec0 + eta * cosDec0, Math.sqrt(xi * xi + denom * denom));
+
+          const ra = ((centerRaRad + deltaRaRad) * 180) / Math.PI;
+          const dec = (decRad * 180) / Math.PI;
+          return [ra, dec];
+        });
+
+        footprints.push(this.A.polygon(raDecCorners, { color: '#00e5a0', lineWidth: 2 }));
+      }
+    }
+
+    this.fovOverlay.addFootprints(footprints);
   }
 
   private angleForSensorDimension(sensorMm: number, focalLengthMm: number): number {

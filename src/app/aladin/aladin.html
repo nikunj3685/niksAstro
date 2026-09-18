@@ -77,24 +77,10 @@
   <div class="aladin-wrapper">
     <div #aladinContainer class="aladin-container"></div>
 
-    @if (reticleVisible() && reticleSize(); as reticle) {
-      <div class="fov-rotator" [style.transform]="'translate(-50%, -50%) rotate(' + effectiveRotationDeg() + 'deg)'">
-        @for (tile of mosaicTiles(); track $index) {
-          <div
-            class="fov-reticle"
-            [style.left.px]="tile.leftPx"
-            [style.top.px]="tile.topPx"
-            [style.width.px]="reticle.widthPx"
-            [style.height.px]="reticle.heightPx"
-          ></div>
-        }
-
-        @if (fovResult(); as result) {
-          <div class="fov-label" [style.bottom.px]="(mosaicBounds()?.heightPx ?? reticle.heightPx) / 2 + 8">
-            FOV: {{ formatAngle(result.widthDeg) }} &times; {{ formatAngle(result.heightDeg) }} &middot; Pixel scale:
-            {{ result.pixelScaleArcsecPerPixel.toFixed(2) }}"/px
-          </div>
-        }
+    @if (reticleVisible() && fovResult(); as result) {
+      <div class="fov-label">
+        FOV: {{ formatAngle(result.widthDeg) }} &times; {{ formatAngle(result.heightDeg) }} &middot; Pixel scale:
+        {{ result.pixelScaleArcsecPerPixel.toFixed(2) }}"/px
       </div>
     }
 
