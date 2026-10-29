@@ -1,0 +1,7 @@
+{
+  "/vendor/dss-color-offline": {
+    "target": "http://localhost:4201",
+    "pathRewrite": { "^/vendor/dss-color-offline": "" },
+    "changeOrigin": true
+  }
+}

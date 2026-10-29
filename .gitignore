@@ -42,3 +42,11 @@ __screenshots__/
 # System files
 .DS_Store
 Thumbs.db
+
+# Offline HiPS sky-tile cache (~5.5GB, bulk-downloaded via a local script, not
+# something git should ever track, and kept outside public/ so ng serve's file
+# watcher doesn't choke on tens of thousands of tiny files). See memory:
+# aladin-offline-local-mode. Served via proxy.conf.json in dev; `npm run
+# build:deploy` copies it into dist/ automatically (plain `npm run build` does
+# not, so routine dev builds stay fast).
+/offline-tiles/
