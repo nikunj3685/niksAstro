@@ -30,6 +30,7 @@ export class Aladin implements AfterViewInit {
   private aladinInstance: any;
   private fovOverlay: any;
   private mosaicOverlapDeg: OverlapDeg = { widthDeg: 0, heightDeg: 0 };
+  private deepSkyCatalog: Record<string, [number, number, string]> | null = null;
 
   protected readonly telescopes = TELESCOPES;
   protected readonly cameras = CAMERAS;
@@ -62,25 +63,71 @@ export class Aladin implements AfterViewInit {
     // centered on the new RA/Dec on every drag step, so the view never rolls
     // in the first place — unlike v3's WebGL/WASM trackball-style 3D camera,
     // which rotates the view on the celestial sphere while panning. v2 isn't
-    // published on npm, so it's loaded as a global script from CDS's own CDN
-    // (the same one their official "vanilla" embed docs point to), with
-    // jQuery as its one hard dependency.
+    // published on npm, and neither it nor its jQuery dependency are loaded
+    // from any external CDN — both are self-hosted under
+    // public/vendor/aladin-lite-v2 so the map never depends on a third
+    // party's uptime (CDS's own CDN has proven intermittently unreachable
+    // at the network level, which broke the whole map with no fallback).
     if (!(window as any).jQuery) {
-      await this.loadScript('https://code.jquery.com/jquery-3.7.1.min.js');
+      await this.loadScript('vendor/aladin-lite-v2/jquery-3.7.1.min.js');
     }
-    this.loadStylesheet('https://aladin.cds.unistra.fr/AladinLite/api/v2/latest/aladin.min.css');
-    await this.loadScript('https://aladin.cds.unistra.fr/AladinLite/api/v2/latest/aladin.min.js');
+    this.loadStylesheet('vendor/aladin-lite-v2/aladin.min.css');
+    await this.loadScript('vendor/aladin-lite-v2/aladin.min.js');
 
     this.A = (window as any).A;
 
+    // Load the bundled NGC/IC/Messier name catalog (public/data/deep-sky-catalog.json,
+    // built from the OpenNGC project) so object names resolve to RA/Dec entirely
+    // offline, instead of depending on CDS's Sesame name-resolver service.
+    try {
+      const response = await fetch('data/deep-sky-catalog.json');
+      this.deepSkyCatalog = await response.json();
+    } catch {
+      this.deepSkyCatalog = null;
+    }
+
+    // Prefer the local tile cache (public/vendor/dss-color-offline, capped at
+    // order 6) by default: it's an instant same-origin disk read, while the
+    // online ESA survey means live tile fetches over the real internet on every
+    // pan/zoom, which in practice was painfully slow even when reachable. Only
+    // fall back to the online survey if the local cache's own properties file
+    // isn't there (e.g. a deployment that forgot to copy offline-tiles/).
+    const localSurveyAvailable = await this.isLocalSurveyAvailable();
+    const initialTarget = this.resolveLocalTarget('NGC 7000') ?? 'NGC 7000';
+
     this.aladinInstance = this.A.aladin(this.container().nativeElement, {
-      target: 'NGC 7000',
+      target: initialTarget,
       fov: 8,
       cooFrame: 'equatorial',
       showCooGridControl: true,
-      showSimbadPointerControl: true,
-      showCooGrid: false
+      showSimbadPointerControl: !localSurveyAvailable,
+      showCooGrid: false,
+      log: false
     });
+
+    // createImageSurvey is an instance method (callable only on an already-created
+    // Aladin view), not a static A.* factory function — calling it on A itself
+    // throws "createImageSurvey is not a function", confirmed against the only
+    // real usage example in the vendored v2 source (`s.createImageSurvey(...)`
+    // where `s` is an Aladin instance).
+    const survey = localSurveyAvailable
+      ? this.aladinInstance.createImageSurvey(
+          'LOCAL/DSSColor',
+          'DSS Color (offline cache)',
+          'vendor/dss-color-offline',
+          'j2000',
+          6,
+          { imgFormat: 'jpg' }
+        )
+      : this.aladinInstance.createImageSurvey(
+          'ESA/DSSColor',
+          'DSS Color (ESA online)',
+          'https://skies.esac.esa.int/DSSColor',
+          'j2000',
+          9,
+          { imgFormat: 'jpg' }
+        );
+    this.aladinInstance.setImageSurvey(survey);
 
     // Draw the FOV rectangle(s) as real sky-coordinate polygons rather than a
     // fixed CSS overlay. Aladin projects overlay shapes with the same WCS math
@@ -111,6 +158,18 @@ export class Aladin implements AfterViewInit {
     link.rel = 'stylesheet';
     link.href = href;
     document.head.appendChild(link);
+  }
+
+  /** Short, bounded check that the local tile cache was actually deployed alongside this build. */
+  private async isLocalSurveyAvailable(): Promise<boolean> {
+    try {
+      const response = await fetch('vendor/dss-color-offline/properties', {
+        signal: AbortSignal.timeout(2000)
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   protected togglePanel(): void {
@@ -146,10 +205,43 @@ export class Aladin implements AfterViewInit {
     }
 
     this.searchError.set(null);
+    // Try the online Sesame name resolver first (it covers far more than our
+    // bundled catalog); only fall back to the local catalog lookup if that fails,
+    // whether because the object isn't known to Sesame or the service is down.
     this.aladinInstance.gotoObject(query, {
       success: () => this.searchError.set(null),
-      error: () => this.searchError.set(`"${query}" not found`)
+      error: () => {
+        const localTarget = this.resolveLocalTarget(query);
+        if (!localTarget) {
+          this.searchError.set(`"${query}" not found`);
+          return;
+        }
+        this.aladinInstance.gotoObject(localTarget, {
+          success: () => this.searchError.set(null),
+          error: () => this.searchError.set(`"${query}" not found`)
+        });
+      }
     });
+  }
+
+  /**
+   * Looks up a Messier/NGC/IC/common name in the bundled offline catalog and, if
+   * found, returns a plain "ra dec" decimal-degree string. Aladin v2's gotoObject
+   * only calls out to the online Sesame name resolver when its target string
+   * contains letters, so handing it this numeric string instead resolves the
+   * object entirely offline.
+   */
+  private resolveLocalTarget(query: string): string | null {
+    if (!this.deepSkyCatalog) {
+      return null;
+    }
+    const key = query.replace(/[\s_-]+/g, '').toUpperCase();
+    const entry = this.deepSkyCatalog[key];
+    if (!entry) {
+      return null;
+    }
+    const [ra, dec] = entry;
+    return `${ra.toFixed(6)} ${dec.toFixed(6)}`;
   }
 
   @HostListener('document:click', ['$event'])
